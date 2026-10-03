@@ -320,3 +320,27 @@ tr.row-detail > td { background: #f7fbfc; border-bottom: 1px solid var(--line); 
   .layout { flex-direction: column; }
   .filters { width: 100%; flex: 1 1 auto; position: static; }
 }
+
+/* 决策快照弹层 */
+.modal.modal-wide { width: 920px; }
+.snap-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.snap-tags { display: flex; gap: 6px; flex-wrap: wrap; }
+.snap-actions { display: flex; align-items: center; gap: 8px; margin: 8px 0; padding: 8px 10px; background: var(--primary-soft); border-radius: 6px; flex-wrap: wrap; }
+.snap-actions .detail-note { margin: 0; }
+.snap-h4 { margin: 14px 0 6px; font-size: 13px; color: var(--primary-dark); }
+.snap-banner { padding: 8px 10px; border-radius: 6px; margin: 8px 0; font-size: 13px; }
+.snap-ok { background: var(--ok-soft); color: var(--ok); border: 1px solid #a9d8c4; }
+.snap-bad { background: var(--accent-soft); color: var(--accent); border: 1px solid #f3b7b0; }
+.snap-table { margin-bottom: 6px; }
+.snap-table td.snap-basis, .snap-table th:nth-child(4) { white-space: normal; min-width: 220px; }
+.snap-table td.snap-causes { white-space: normal; min-width: 180px; line-height: 1.9; }
+.snap-scroll { max-height: 320px; overflow: auto; border: 1px solid var(--line-soft); border-radius: 4px; }
+.snap-scroll .mini-table th { position: sticky; top: 0; z-index: 1; }
+.snap-details { margin: 6px 0; }
+.snap-details summary { cursor: pointer; color: var(--primary-dark); font-weight: 700; padding: 4px 0; }
+.snap-list { margin: 4px 0; padding-left: 18px; }
+.snap-list li { padding: 2px 0; }
+.snap-none { color: var(--ink-soft); font-size: 12px; }
+.pill-warn { color: #9a6a00; border-color: #e8d191; background: #fdf6e3; }
+tr.row-diff td { background: #fdf6e3; }
+tr.row-flip td { background: var(--accent-soft); }

@@ -1,6 +1,7 @@
 const { AppError } = require('./errors');
 const store = require('./store');
 const coldlib = require('./coldlib');
+const snapshotLib = require('./snapshot');
 
 const ROOM_STATUS = ['运行', '检修', '停用'];
 const ROOM_TYPE = ['冷藏库', '冷藏车', '冷冻库'];
@@ -211,7 +212,7 @@ function batchDetail(data, id) {
     effectiveRecords: coldlib.effectiveRecords(data, id).map((r) => Object.assign({}, r, { probeCode: probeCode(data, r.probeId) })),
     segments: coldlib.excursionStats(data, id).segments,
     chainGaps: coldlib.chainGaps(data, id).gaps,
-    releases: data.releases.filter((r) => r.batchId === id).slice().sort((a, b) => (a.decidedAt < b.decidedAt ? 1 : -1)),
+    releases: data.releases.filter((r) => r.batchId === id).slice().sort((a, b) => (a.decidedAt < b.decidedAt ? 1 : -1)).map((r) => decorateRelease(data, r)),
   });
 }
 
@@ -270,7 +271,10 @@ function removeBatch(data, id) {
   if (batch.status === '已放行') throw new AppError(409, 'BATCH_RELEASED', '这个批次已经放行，不能直接删除', { code: batch.code });
   const used = data.records.filter((r) => r.batchId === id).length;
   data.records = data.records.filter((r) => r.batchId !== id);
+  const releaseIds = {};
+  data.releases.filter((r) => r.batchId === id).forEach((r) => { releaseIds[r.id] = true; });
   data.releases = data.releases.filter((r) => r.batchId !== id);
+  data.snapshots = data.snapshots.filter((s) => !releaseIds[s.releaseId]);
   data.batches = data.batches.filter((b) => b.id !== id);
   return { removed: id, removedRecords: used };
 }
@@ -334,8 +338,49 @@ function listReleases(data, query) {
   if (q.batchId) rows = rows.filter((r) => r.batchId === q.batchId);
   if (q.decision) rows = rows.filter((r) => r.decision === q.decision);
   return rows
-    .map((r) => Object.assign({}, r, { batchCode: batchCode(data, r.batchId) }))
+    .map((r) => decorateRelease(data, r))
     .sort((a, b) => (a.decidedAt < b.decidedAt ? 1 : -1));
+}
+
+function decorateRelease(data, release) {
+  const snap = snapshotLib.getSnapshot(data, release.id);
+  return Object.assign({}, release, {
+    batchCode: batchCode(data, release.batchId),
+    snapshotId: snap ? snap.id : '',
+    snapshotParametersAssumed: snap ? !!snap.parametersAssumed : false,
+    snapshotCreatedAt: snap ? snap.createdAt : '',
+  });
+}
+
+function requireReleaseWithSnapshot(data, releaseId) {
+  const release = data.releases.find((r) => r.id === releaseId);
+  if (!release) throw new AppError(404, 'RELEASE_NOT_FOUND', '这张放行单不存在');
+  const snap = snapshotLib.getSnapshot(data, release.id);
+  if (!snap) throw new AppError(404, 'SNAPSHOT_NOT_FOUND', '这张放行单没有决策快照，无法复算');
+  return { release, snap };
+}
+
+// 读取一张单子的完整快照（口径、探头清单、参与记录、逐条取值、四条判据依据）
+function releaseSnapshot(data, releaseId) {
+  const { release, snap } = requireReleaseWithSnapshot(data, releaseId);
+  return {
+    snapshot: snap,
+    currentSettings: coldlib.freezeSettings(data.settings),
+    replay: snapshotLib.replay(snap),
+    release: decorateRelease(data, release),
+  };
+}
+
+// 一键按快照复算
+function replayRelease(data, releaseId) {
+  const { snap } = requireReleaseWithSnapshot(data, releaseId);
+  return snapshotLib.replay(snap);
+}
+
+// 按当前口径重算“如果现在判会怎样”
+function recomputeRelease(data, releaseId) {
+  const { snap } = requireReleaseWithSnapshot(data, releaseId);
+  return snapshotLib.recompute(data, snap);
 }
 
 // 放行：登记放行单并改批次状态
@@ -361,11 +406,15 @@ function decide(data, batchId, payload) {
     chainGapCount: check.chain.gapCount,
     basis: String(payload.basis || '').trim(),
     remark: String(payload.remark || ''),
+    snapshotId: '',
   };
+  // 先登记单子，再冻结当时口径、记录、探头清单与逐条判定依据，回填快照号
   data.releases.push(release);
+  const snap = snapshotLib.createSnapshot(data, batch, release, { origin: 'decision' });
+  release.snapshotId = snap.id;
   batch.status = payload.decision === '放行' ? '已放行' : '已拒收';
   batch.decidedAt = release.decidedAt;
-  return { release, batch: decorateBatch(data, batch) };
+  return { release: decorateRelease(data, release), batch: decorateBatch(data, batch), snapshotId: snap.id };
 }
 
 module.exports = {
@@ -374,5 +423,6 @@ module.exports = {
   listBatches, batchDetail, createBatch, updateBatch, removeBatch,
   listRecords, createRecord, removeRecord,
   listReleases, decide,
+  releaseSnapshot, replayRelease, recomputeRelease,
   ROOM_STATUS, ROOM_TYPE, PROBE_STATUS, BATCH_STATUS, SOURCE_LIST,
 };
