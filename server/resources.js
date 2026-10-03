@@ -1,6 +1,7 @@
 const { AppError } = require('./errors');
 const store = require('./store');
 const coldlib = require('./coldlib');
+const snapshots = require('./snapshots');
 
 const ROOM_STATUS = ['运行', '检修', '停用'];
 const ROOM_TYPE = ['冷藏库', '冷藏车', '冷冻库'];
@@ -52,7 +53,7 @@ function decorateBatch(data, batch) {
     longestExcursionMinutes: stats.longestMinutes,
     totalExcursionMinutes: stats.totalMinutes,
     mkt: check.mkt,
-    chainGapCount: check.chain.gapCount,
+    chainGapCount: check.chainGaps.length,
     expiredProbeCodes: check.expiredProbes.map((p) => p.probeCode),
     releaseCheck: check,
     releaseCount: releases.length,
@@ -271,6 +272,7 @@ function removeBatch(data, id) {
   const used = data.records.filter((r) => r.batchId === id).length;
   data.records = data.records.filter((r) => r.batchId !== id);
   data.releases = data.releases.filter((r) => r.batchId !== id);
+  data.snapshots = data.snapshots.filter((s) => s.batchId !== id);
   data.batches = data.batches.filter((b) => b.id !== id);
   return { removed: id, removedRecords: used };
 }
@@ -358,11 +360,17 @@ function decide(data, batchId, payload) {
     mkt: check.mkt,
     longestExcursionMinutes: check.longestMinutes,
     totalExcursionMinutes: check.totalMinutes,
-    chainGapCount: check.chain.gapCount,
+    chainGapCount: check.chainGaps.length,
+    checkPass: check.pass,
+    failedKeys: check.failed.slice(),
     basis: String(payload.basis || '').trim(),
     remark: String(payload.remark || ''),
   };
   data.releases.push(release);
+  // 固化当时的口径参数、探头清单、参与记录与逐条取值、四条判据的结论与依据
+  const snapshot = snapshots.makeSnapshot(data, batch, release);
+  data.snapshots.push(snapshot);
+  release.snapshotId = snapshot.id;
   batch.status = payload.decision === '放行' ? '已放行' : '已拒收';
   batch.decidedAt = release.decidedAt;
   return { release, batch: decorateBatch(data, batch) };

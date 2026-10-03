@@ -4,6 +4,7 @@
    显示纪律：超限段、断链、MKT、放行判定、各类计数一律直接显示接口返回值，前端不自行计算与重排。 */
 
 const RECORD_PAGE = 200;
+const SNAP_RECORD_PAGE = 100;
 const BATCH_STATUS = ['在库', '待放行', '已放行', '已拒收'];
 const ROOM_STATUS = ['运行', '检修', '停用'];
 const ROOM_TYPE = ['冷藏库', '冷藏车', '冷冻库'];
@@ -138,6 +139,8 @@ function closeModal() {
   $('modalMask').hidden = true;
   modalOnOk = null;
   $('modalBody').innerHTML = '';
+  document.querySelector('.modal').classList.remove('modal-lg');
+  $('modalOk').style.display = '';
   markErrorFields(null);
 }
 
@@ -424,9 +427,8 @@ function batchDetailRow(b) {
   }).join('') || '<tr><td colspan="4" class="empty">没有断链缺口</td></tr>';
 
   const check = d.releaseCheck || {};
-  const conds = (check.conditions || []).slice();
+  const conds = check.conditions || [];
   const expired = check.expiredProbes || [];
-  conds.push({ key: 'calibration', ok: expired.length === 0, value: expired.length, limit: 0, text: '参与判定的探头都在校准有效期内' });
   const condHtml = conds.map(function (c) {
     return '<li><span class="cond-text">' + okPill(c.ok) + ' ' + esc(c.text) + '</span>' +
       '<span class="cond-meta">实际 ' + esc(c.value) + '，阈值 ' + esc(c.limit) + '</span></li>';
@@ -437,9 +439,12 @@ function batchDetailRow(b) {
   }).join('') || '<tr><td colspan="3" class="empty">没有已过校准期的探头</td></tr>';
 
   const releases = (d.releases || []).map(function (r) {
+    const snapBtn = r.snapshotId
+      ? '<button type="button" class="btn btn-sm" data-action="release-snap" data-id="' + esc(r.snapshotId) + '">快照</button>'
+      : '<span class="muted-note">旧单无快照</span>';
     return '<tr><td>' + esc(r.decision) + '</td><td>' + esc(r.decidedAt) + '</td><td>' + esc(r.decider) + '</td>' +
-      '<td class="num">' + num(r.mkt) + '</td><td>' + esc(r.basis) + '</td></tr>';
-  }).join('') || '<tr><td colspan="5" class="empty">没有放行记录</td></tr>';
+      '<td class="num">' + num(r.mkt) + '</td><td>' + esc(r.basis) + '</td><td>' + snapBtn + '</td></tr>';
+  }).join('') || '<tr><td colspan="6" class="empty">没有放行记录</td></tr>';
 
   const decisionBtns = '<div class="detail-actions">' +
     '<button type="button" class="btn btn-primary" data-action="batch-release" data-id="' + esc(b.id) + '">放行</button>' +
@@ -458,7 +463,7 @@ function batchDetailRow(b) {
     '<h4>已过校准期的探头（' + expired.length + '）</h4>' +
     '<table class="mini-table"><thead><tr><th>探头</th><th>校准有效期</th><th>记录时刻</th></tr></thead><tbody>' + expiredProbes + '</tbody></table></div>' +
     '<div class="detail-block"><h4>放行记录（' + (d.releases || []).length + '）</h4>' +
-    '<table class="mini-table"><thead><tr><th>决定</th><th>时刻</th><th>经办人</th><th class="num">MKT</th><th>依据</th></tr></thead><tbody>' + releases + '</tbody></table>' +
+    '<table class="mini-table"><thead><tr><th>决定</th><th>时刻</th><th>经办人</th><th class="num">MKT</th><th>依据</th><th>可复算快照</th></tr></thead><tbody>' + releases + '</tbody></table>' +
     decisionBtns + '</div>' +
     '</div></td></tr>';
 }
@@ -495,7 +500,7 @@ async function expandBatch(id) {
         effectiveRecords: [],
         segments: [],
         segmentsUnavailable: true,
-        chainGaps: (check.chain && check.chain.gaps) || [],
+        chainGaps: check.chainGaps || [],
         releases: fallback[2] || [],
         releaseCheck: check,
         __fallback: true
@@ -570,10 +575,13 @@ async function loadReleasesView() {
   }
   const tbody = $('releaseRows');
   if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="10" class="empty">没有符合条件的放行记录</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="11" class="empty">没有符合条件的放行记录</td></tr>';
     return;
   }
   tbody.innerHTML = rows.map(function (r) {
+    const snapCell = r.snapshotId
+      ? '<button type="button" class="btn btn-sm" data-action="release-snap" data-id="' + esc(r.snapshotId) + '">查看快照 / 复算</button>'
+      : '<span class="muted-note">旧单无快照</span>';
     return '<tr class="row-main" data-rowkind="release" data-id="' + esc(r.id) + '">' +
       '<td>' + esc(r.batchCode) + '</td>' +
       '<td>' + (r.decision === '放行' ? pill('放行', 'pill-ok') : pill('拒收', 'pill-bad')) + '</td>' +
@@ -585,6 +593,7 @@ async function loadReleasesView() {
       '<td class="num">' + num(r.chainGapCount) + '</td>' +
       '<td>' + esc(r.basis) + '</td>' +
       '<td>' + esc(r.remark) + '</td>' +
+      '<td>' + snapCell + '</td>' +
       '</tr>';
   }).join('');
 }
@@ -780,6 +789,251 @@ function openRecordForm() {
   });
 }
 
+/* ---------- 判定快照：查看 / 复算 / 当前口径重算 ---------- */
+
+function setModalWide(wide) {
+  document.querySelector('.modal').classList.toggle('modal-lg', !!wide);
+  $('modalOk').style.display = wide ? 'none' : '';
+}
+
+function condOkPill(ok) {
+  return ok ? pill('满足', 'pill-ok') : pill('不满足', 'pill-bad');
+}
+
+function snapProbeCode(snap, probeId) {
+  const p = (snap.probesInvolved || []).find(function (x) { return x.id === probeId; });
+  if (p) return p.code;
+  const cur = state.probes.find(function (x) { return x.id === probeId; });
+  return cur ? cur.code : probeId;
+}
+
+function snapshotSettingsHtml(snap) {
+  const st = snap.settings || {};
+  const rows = [
+    ['温度带', st.lowerLimitC + ' ℃ ～ ' + st.upperLimitC + ' ℃'],
+    ['单次允许超限', st.allowExcursionMinutes + ' 分钟'],
+    ['累计允许超限', st.allowTotalExcursionMinutes + ' 分钟'],
+    ['断链门槛', st.chainGapMinutes + ' 分钟'],
+    ['记录间隔', st.recordIntervalMinutes + ' 分钟'],
+    ['校准宽限天数', st.probeCalibrationGraceDays + ' 天']
+  ];
+  return '<table class="mini-table"><tbody>' + rows.map(function (r) {
+    return '<tr><th>' + esc(r[0]) + '</th><td class="num">' + esc(r[1]) + '</td></tr>';
+  }).join('') + '</tbody></table>';
+}
+
+function snapshotProbesHtml(snap) {
+  const rows = (snap.probesInvolved || []).map(function (p) {
+    return '<tr><td>' + esc(p.code) + '</td><td>' + esc(p.position || '') + '</td><td>' + esc(p.status) + '</td><td>' + esc(p.calibratedUntil) + '</td></tr>';
+  }).join('') || '<tr><td colspan="4" class="empty">没有参与判定的探头</td></tr>';
+  return '<table class="mini-table"><thead><tr><th>编号</th><th>位置</th><th>状态</th><th>校准有效期</th></tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+function conditionBasisHtml(c, snap) {
+  if (c.key === 'longest' || c.key === 'total') {
+    const segs = (c.basis && c.basis.segments) || [];
+    if (!segs.length) return '<div class="field-hint">没有超限段</div>';
+    const rows = segs.map(function (g) {
+      return '<tr><td>' + esc(snapProbeCode(snap, g.probeId)) + '</td><td>' + esc(g.startAt) + '</td><td>' + esc(g.endAt) +
+        '</td><td class="num">' + num(g.minutes) + '</td><td class="num">' + num(g.peakC) + '</td><td class="num">' + num(g.points) + '</td></tr>';
+    }).join('');
+    return '<table class="mini-table"><thead><tr><th>探头</th><th>起</th><th>止</th><th class="num">时长(分)</th><th class="num">峰值(℃)</th><th class="num">点数</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  }
+  if (c.key === 'chain') {
+    const gaps = (c.basis && c.basis.gaps) || [];
+    if (!gaps.length) return '<div class="field-hint">没有断链</div>';
+    const rows = gaps.map(function (g) {
+      return '<tr><td>' + esc(snapProbeCode(snap, g.probeId)) + '</td><td>' + esc(g.from) + '</td><td>' + esc(g.to) +
+        '</td><td class="num">' + num(g.minutes) + '</td></tr>';
+    }).join('');
+    return '<table class="mini-table"><thead><tr><th>探头</th><th>起</th><th>止</th><th class="num">实际间隔(分)</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  }
+  // calibration
+  const probes = (c.basis && c.basis.probes) || [];
+  const rows = probes.map(function (p) {
+    return '<tr' + ((!p.calibrationValid || !p.inUse) ? ' class="row-danger"' : '') + '><td>' + esc(p.probeCode) + '</td><td>' + esc(p.status) +
+      '</td><td>' + esc(p.calibratedUntil) + '</td><td>' + esc(p.firstRecordAt) + '</td>' +
+      '<td>' + (p.calibrationValid ? pill('有效', 'pill-ok') : pill('过期', 'pill-bad')) + '</td>' +
+      '<td>' + (p.inUse ? pill('在用', 'pill-ok') : pill('停用', 'pill-bad')) + '</td></tr>';
+  }).join('') || '<tr><td colspan="6" class="empty">没有参与判定的探头</td></tr>';
+  return '<table class="mini-table"><thead><tr><th>探头</th><th>状态</th><th>校准有效期</th><th>最早记录</th><th>校准</th><th>在用</th></tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+function snapshotConditionsHtml(snap) {
+  const conds = (snap.result && snap.result.conditions) || [];
+  return conds.map(function (c) {
+    return '<div class="snap-cond">' +
+      '<div class="snap-cond-head">' + condOkPill(c.ok) + '<span class="cond-text">' + esc(c.text) + '</span>' +
+      '<span class="cond-meta">实际 ' + esc(c.value) + '，阈值 ' + esc(c.limit) + '</span></div>' +
+      conditionBasisHtml(c, snap) + '</div>';
+  }).join('');
+}
+
+function snapshotRecordsHtml(snap) {
+  const detailMap = {};
+  ((snap.result && snap.result.records) || []).forEach(function (d) { detailMap[d.recordId] = d; });
+  const records = snap.records || [];
+  const shown = records.slice(0, SNAP_RECORD_PAGE);
+  const rows = shown.map(function (r) {
+    const d = detailMap[r.id] || {};
+    return '<tr' + (d.outOfRange ? ' class="row-danger"' : '') + '><td>' + esc(r.at) + '</td><td>' + esc(snapProbeCode(snap, r.probeId)) +
+      '</td><td class="num">' + num(r.temperatureC) + '</td><td>' + esc(r.source) + '</td>' +
+      '<td>' + (d.outOfRange ? pill('超限', 'pill-bad') : pill('正常', 'pill-mute')) + '</td>' +
+      '<td class="num">' + (d.outOfRange ? num(d.segmentMinutes) : '—') + '</td>' +
+      '<td>' + (d.gap ? pill('断链 ' + num(d.gapMinutes) + '分', 'pill-bad') : '—') + '</td></tr>';
+  }).join('') || '<tr><td colspan="7" class="empty">没有参与判定的记录</td></tr>';
+  const more = records.length > shown.length ? '<div class="field-hint">共 ' + records.length + ' 条，前 ' + shown.length + ' 条见下；全部记录已固化在快照中，复算使用全部记录。</div>' : '';
+  return '<table class="mini-table"><thead><tr><th>时刻</th><th>探头</th><th class="num">温度(℃)</th><th>来源</th><th>是否超限</th><th class="num">所在段时长(分)</th><th>断链</th></tr></thead><tbody>' + rows + '</tbody></table>' + more;
+}
+
+function renderSnapshotBody(snap) {
+  const pass = snap.result && snap.result.pass;
+  return '<div class="snap-head">' +
+    '<div><span class="snap-title">' + esc(snap.batchCode) + '</span> ' +
+      (snap.decision === '放行' ? pill('放行', 'pill-ok') : pill('拒收', 'pill-bad')) + ' ' +
+      (pass ? pill('判定满足', 'pill-ok') : pill('判定不满足', 'pill-bad')) + '</div>' +
+    '<div class="field-hint">快照 ' + esc(snap.id) + ' ｜ ' + esc(snap.decidedAt) + ' ｜ 经办人 ' + esc(snap.decider) +
+      ' ｜ 算法版本 ' + esc(snap.calcVersion) + '</div>' +
+    (snap.basis ? '<div class="field-hint">单据依据：' + esc(snap.basis) + '</div>' : '') +
+    '</div>' +
+    '<div class="snap-actions">' +
+      '<button type="button" class="btn btn-primary" data-action="snap-replay" data-id="' + esc(snap.id) + '">按快照复算</button>' +
+      '<button type="button" class="btn" data-action="snap-recheck" data-id="' + esc(snap.id) + '">按当前口径重算（如果现在判）</button>' +
+      '<span class="field-hint">复算只用快照内固化的记录与口径；重算用当前口径、探头与记录。</span>' +
+    '</div>' +
+    '<div id="snapCompare"></div>' +
+    '<div class="snap-grid">' +
+      '<section class="snap-section"><h4>当时口径参数</h4>' + snapshotSettingsHtml(snap) + '</section>' +
+      '<section class="snap-section"><h4>参与判定的探头清单（' + (snap.probesInvolved || []).length + '）</h4>' + snapshotProbesHtml(snap) + '</section>' +
+    '</div>' +
+    '<section class="snap-section"><h4>四条判据的结论与依据</h4>' + snapshotConditionsHtml(snap) + '</section>' +
+    '<section class="snap-section"><h4>参与判定的记录与逐条取值（' + (snap.records || []).length + '）</h4>' + snapshotRecordsHtml(snap) + '</section>';
+}
+
+async function openSnapshotModal(id) {
+  try {
+    const snap = await api('GET', '/api/snapshots/' + encodeURIComponent(id));
+    setModalWide(true);
+    openModal('判定快照 · 可复算', renderSnapshotBody(snap), '关闭', null);
+  } catch (err) { showError(err); }
+}
+
+function condBriefRow(label, ok, value, limit) {
+  return '<tr><td>' + esc(label) + '</td><td>' + condOkPill(ok) + '</td><td class="num">' + esc(value) + '</td><td class="num">' + esc(limit) + '</td></tr>';
+}
+
+function compareConditionsTable(title, brief) {
+  const rows = (brief || []).map(function (c) { return condBriefRow(c.label, c.ok, c.value, c.limit); }).join('');
+  return '<div class="snap-side"><div class="snap-side-title">' + esc(title) + '</div>' +
+    '<table class="mini-table"><thead><tr><th>判据</th><th>结论</th><th class="num">实际</th><th class="num">阈值</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+}
+
+async function snapshotReplay(id) {
+  try {
+    const r = await api('POST', '/api/snapshots/' + encodeURIComponent(id) + '/replay');
+    const banner = r.consistent
+      ? pill('复算一致：按快照内的记录与口径，算出与当时单子完全相同的结论', 'pill-ok')
+      : pill('复算不一致：同一快照输入算出了不同结论，算法版本可能已变更', 'pill-bad');
+    $('snapCompare').innerHTML = '<div class="snap-compare">' + banner +
+      '<div class="snap-grid-2">' +
+      compareConditionsTable('单子上的结论（MKT ' + num(r.stored.mkt) + '）', r.stored.conditions) +
+      compareConditionsTable('按快照复算（MKT ' + num(r.replay.mkt) + '）', r.replay.conditions) +
+      '</div></div>';
+  } catch (err) { showError(err); }
+}
+
+const RECORD_KIND_LABEL = { added: '新增', removed: '删除', modified: '修改', replaced: '换用记录' };
+
+function recordChangeText(ch, snap) {
+  const code = snapProbeCode(snap, ch.probeId);
+  if (ch.kind === 'added') {
+    return esc(code + ' ' + ch.at + ' 新增 ' + ch.after.source + '记录 ' + ch.after.recordId + '，温度 ' + ch.after.temperatureC + '℃');
+  }
+  if (ch.kind === 'removed') {
+    return esc(code + ' ' + ch.at + ' 记录 ' + ch.before.recordId + '（' + ch.before.temperatureC + '℃，' + ch.before.source + '）已删除');
+  }
+  if (ch.kind === 'replaced') {
+    return esc(code + ' ' + ch.at + ' 去重胜出者由 ' + ch.before.recordId + '（' + ch.before.source + ' ' + ch.before.temperatureC + '℃）换为 ' +
+      ch.after.recordId + '（' + ch.after.source + ' ' + ch.after.temperatureC + '℃）');
+  }
+  return esc(code + ' ' + ch.at + ' 记录 ' + ch.before.recordId + ' 温度 ' + ch.before.temperatureC + '℃→' + ch.after.temperatureC + '℃');
+}
+
+function diffStatusPill(status) {
+  if (status === '结论翻转') return pill(status, 'pill-bad');
+  if (status === '一致') return pill(status, 'pill-ok');
+  return pill(status, 'pill-mute');
+}
+
+async function snapshotRecheck(id) {
+  try {
+    const snap = await api('GET', '/api/snapshots/' + encodeURIComponent(id));
+    const r = await api('POST', '/api/snapshots/' + encodeURIComponent(id) + '/recheck');
+    const banner = r.consistent
+      ? pill('两份结论一致：现在按当前口径判，结论与当时相同', 'pill-ok')
+      : pill('两份结论不一致：当时判为' + (r.stored.pass ? '满足' : '不满足') + '，现在判为' + (r.current.pass ? '满足' : '不满足') +
+          '（MKT ' + num(r.stored.mkt) + ' → ' + num(r.current.mkt) + '）', 'pill-bad');
+
+    let html = '<div class="snap-compare">' + banner + '<div class="snap-grid-2">' +
+      compareConditionsTable('单子上的结论', r.stored.conditions) +
+      compareConditionsTable('按当前口径重算（' + num(r.current.recordCount) + ' 条记录）', r.current.conditions) +
+      '</div>';
+
+    const paramRows = (r.paramChanges || []).map(function (p) {
+      return '<li>' + esc(p.label) + '：<b>' + esc(p.from) + '</b> → <b>' + esc(p.to) + '</b></li>';
+    }).join('');
+    html += '<div class="snap-reason"><h5>发生变化的口径参数（' + (r.paramChanges || []).length + '）</h5>' +
+      (paramRows ? '<ul class="reason-list">' + paramRows + '</ul>' : '<div class="field-hint">口径参数没有变化</div>') + '</div>';
+
+    const recRows = (r.recordChanges || []).slice(0, 20).map(function (ch) {
+      return '<li><span class="reason-tag">' + esc(RECORD_KIND_LABEL[ch.kind] || ch.kind) + '</span>' + recordChangeText(ch, snap) + '</li>';
+    }).join('');
+    const recMore = (r.recordChanges || []).length > 20 ? '<li class="field-hint">其余 ' + ((r.recordChanges || []).length - 20) + ' 条略</li>' : '';
+    html += '<div class="snap-reason"><h5>发生变化的记录（' + (r.recordChanges || []).length + '）</h5>' +
+      (recRows ? '<ul class="reason-list">' + recRows + recMore + '</ul>' : '<div class="field-hint">参与判定的记录没有变化</div>') + '</div>';
+
+    const probeRows = (r.probeChanges || []).map(function (ch) {
+      const b = ch.before || { code: ch.probeId, status: '—', calibratedUntil: '—' };
+      const a = ch.after || { code: ch.probeId, status: '已从台账删除', calibratedUntil: '—' };
+      return '<li><span class="reason-tag">' + esc(RECORD_KIND_LABEL[ch.kind] || ch.kind) + '</span>' + esc(b.code) +
+        '：' + esc(b.status + ' / 校准至 ' + b.calibratedUntil) + ' → ' + esc(a.status + ' / 校准至 ' + a.calibratedUntil) + '</li>';
+    }).join('');
+    html += '<div class="snap-reason"><h5>参与探头清单变化（' + (r.probeChanges || []).length + '）</h5>' +
+      (probeRows ? '<ul class="reason-list">' + probeRows + '</ul>' : '<div class="field-hint">参与判定的探头没有变化</div>') + '</div>';
+
+    // 逐判据差异：差在哪一条、差多少、因为什么
+    const diffRows = (r.conditionDiffs || []).map(function (d) {
+      const reasons = [];
+      (d.paramChanges || []).forEach(function (p) { reasons.push('参数 ' + p.label + ' ' + p.from + '→' + p.to); });
+      if ((d.recordChanges || []).length) reasons.push('记录变化 ' + d.recordChanges.length + ' 条');
+      (d.probeChanges || []).forEach(function (p) {
+        const a = p.after || { status: '已删除' };
+        reasons.push('探头 ' + (p.before ? p.before.code : p.probeId) + ' 变为「' + a.status + ' / 校准至 ' + a.calibratedUntil + '」');
+      });
+      if ((d.detail && d.detail.newGaps || []).length) {
+        reasons.push('新增断链 ' + d.detail.newGaps.map(function (g) { return g.from + '→' + g.to + '（' + g.minutes + '分）'; }).join('、'));
+      }
+      const delta = d.key === 'chain' || d.key === 'calibration'
+        ? (d.valueDelta > 0 ? '+' + d.valueDelta : String(d.valueDelta)) + ' 条'
+        : (d.valueDelta > 0 ? '+' + d.valueDelta : String(d.valueDelta)) + ' 分钟';
+      return '<tr><td>' + esc(d.label) + '</td><td>' + diffStatusPill(d.status) + '</td>' +
+        '<td>' + condOkPill(d.storedOk) + '<span class="muted-note"> ' + esc(d.storedValue) + '/' + esc(d.storedLimit) + '</span></td>' +
+        '<td>' + condOkPill(d.currentOk) + '<span class="muted-note"> ' + esc(d.currentValue) + '/' + esc(d.currentLimit) + '</span></td>' +
+        '<td class="num">' + esc(d.valueDelta === 0 ? '—' : delta) + '</td>' +
+        '<td>' + (reasons.length ? reasons.map(esc).join('；') : '<span class="muted-note">无</span>') + '</td></tr>';
+    }).join('');
+    html += '<div class="snap-reason"><h5>逐判据对照与归因</h5>' +
+      '<table class="mini-table"><thead><tr><th>判据</th><th>差异</th><th>当时（实际/阈值）</th><th>现在（实际/阈值）</th><th class="num">差多少</th><th>因为哪项参数 / 哪几条记录 / 探头</th></tr></thead><tbody>' +
+      diffRows + '</tbody></table></div>';
+
+    if (r.versionChanged) {
+      html += '<div class="field-hint">注意：判定算法版本已由 ' + esc(r.calcVersion.from) + ' 升级到 ' + esc(r.calcVersion.to) + '，差异也可能来自算法变化。</div>';
+    }
+    html += '</div>';
+    $('snapCompare').innerHTML = html;
+  } catch (err) { showError(err); }
+}
+
 /* ---------- 变更后刷新 ---------- */
 
 async function loadBase() {
@@ -899,6 +1153,9 @@ async function handleAction(action, el) {
       });
       return;
     }
+    if (action === 'release-snap') { await openSnapshotModal(el.dataset.id); return; }
+    if (action === 'snap-replay') { await snapshotReplay(el.dataset.id); return; }
+    if (action === 'snap-recheck') { await snapshotRecheck(el.dataset.id); return; }
   } catch (err) { showError(err); }
 }
 

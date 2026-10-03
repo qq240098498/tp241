@@ -19,7 +19,7 @@ const DEFAULT_SETTINGS = {
 function normalize(raw) {
   const data = raw && typeof raw === 'object' ? raw : {};
   data.settings = Object.assign({}, DEFAULT_SETTINGS, data.settings || {});
-  for (const key of ['rooms', 'probes', 'batches', 'records', 'releases']) {
+  for (const key of ['rooms', 'probes', 'batches', 'records', 'releases', 'snapshots']) {
     if (!Array.isArray(data[key])) data[key] = [];
   }
   return data;

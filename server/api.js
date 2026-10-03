@@ -5,6 +5,7 @@ const res = require('./resources');
 const coldlib = require('./coldlib');
 
 const router = express.Router();
+const snapshots = require('./snapshots');
 
 function withData(handler) {
   return (req, reqRes, next) => {
@@ -112,6 +113,11 @@ router.post('/records', withData((data, req) => ({ __save: true, __body: res.cre
 router.delete('/records/:id', withData((data, req) => ({ __save: true, __body: res.removeRecord(data, req.params.id) })));
 
 router.get('/releases', withData((data, req) => res.listReleases(data, req.query)));
+
+// 判定快照：查看 / 按快照复算 / 按当前口径重算并归因差异（只读，不落库）
+router.get('/snapshots/:id', withData((data, req) => snapshots.getSnapshot(data, req.params.id)));
+router.post('/snapshots/:id/replay', withData((data, req) => snapshots.replaySnapshot(data, req.params.id)));
+router.post('/snapshots/:id/recheck', withData((data, req) => snapshots.recheckSnapshot(data, req.params.id)));
 
 router.use((req, r, next) => next(new AppError(404, 'NOT_FOUND', '这个地址没有对应功能：' + req.method + ' ' + req.originalUrl)));
 
